@@ -1,0 +1,128 @@
+services:
+  producer:
+    container_name: producer
+    build:
+      context: ./producer
+      network: host
+      args:
+        - FILE_COUNT=10000
+        - FILE_SIZE=10240
+        - BATCH_SIZE=500
+        - APP_PORT=4000
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://0.0.0.0:4000']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - custom_network
+      - monitoring
+    ports:
+      - 4000
+
+  consumer:
+    build:
+      context: ./consumer
+      args:
+        - PRODUCER_PROTOCOL=http
+        - PRODUCER_PATH=/files
+        - PRODUCER_HOST=producer
+        - PRODUCER_PORT=4000
+      network: host
+    depends_on:
+      producer:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    ports:
+      - 5000
+    networks:
+      - custom_network
+      - monitoring
+    deploy:
+      mode: replicated
+      replicas: 3
+      # Virtual IP so that there's a single IP for the service
+      endpoint_mode: vip
+      # Restarting on errors
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 2
+        window: 60s
+      # Limit for each of the replicas
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 500M
+        reservations:
+          cpus: '0.25'
+          memory: 250M
+
+  # https://grafana.com/docs/grafana/latest/setup-grafana/installation/docker/#run-grafana-via-docker-compose
+  grafana:
+    image: grafana/grafana-enterprise
+    container_name: grafana
+    restart: unless-stopped
+    user: '0'
+    depends_on:
+      prometheus:
+        condition: service_started
+      node-exporter:
+        condition: service_started
+    ports:
+      - '3000:3000'
+    volumes:
+      - 'grafana_storage:/var/lib/grafana'
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - monitoring
+
+  # https://grafana.com/docs/grafana-cloud/send-data/metrics/metrics-prometheus/prometheus-config-examples/docker-compose-linux/
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - '9100:9100'
+    networks:
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - '9090:9090'
+    networks:
+      - monitoring
+
+networks:
+  custom_network:
+  monitoring:
+    driver: bridge
+
+volumes:
+  grafana_storage: {}
+  prometheus_data: {}
